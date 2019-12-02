@@ -87,6 +87,8 @@ import cpw.mods.fml.common.versioning.VersionParser;
 import cpw.mods.fml.relauncher.ModListHelper;
 import cpw.mods.fml.relauncher.Side;
 
+import net.minecraftforge.oredict.OreDictionary;
+
 /**
  * The loader class performs the actual loading of the mod code from disk.
  *
@@ -740,6 +742,7 @@ public class Loader
         modController.distributeStateMessage(FMLInterModComms.IMCEvent.class);
         ItemStackHolderInjector.INSTANCE.inject();
         modController.distributeStateMessage(LoaderState.POSTINITIALIZATION);
+        OreDictionary.solidify(false);
         progressBar.step("Finishing up");
         modController.transition(LoaderState.AVAILABLE, false);
         modController.distributeStateMessage(LoaderState.AVAILABLE);
