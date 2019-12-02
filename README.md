@@ -1,11 +1,11 @@
 # MinecraftForge
 
-##Preparing
+## Preparing
 ```sh
 ./gradlew setupForge
 ```
 
-##Building
+## Building
 ```sh
 ./gradlew genPatches buildPackages publishToMavenLocal
 ```
