@@ -85,10 +85,9 @@ public final class SpecialArrayList<T> extends ArrayList<T> {
   return internalSet.contains(o);
  }
 
- //TODO Might cause problems
  @Override
  public Object clone() {
-  throw new UnsupportedOperationException();
+  return new ArrayList<>(this);
  }
 
  @Override
