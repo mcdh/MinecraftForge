@@ -742,7 +742,7 @@ public class Loader
         modController.distributeStateMessage(FMLInterModComms.IMCEvent.class);
         ItemStackHolderInjector.INSTANCE.inject();
         modController.distributeStateMessage(LoaderState.POSTINITIALIZATION);
-        OreDictionary.solidify(false);
+//        OreDictionary.solidify(false);
         progressBar.step("Finishing up");
         modController.transition(LoaderState.AVAILABLE, false);
         modController.distributeStateMessage(LoaderState.AVAILABLE);

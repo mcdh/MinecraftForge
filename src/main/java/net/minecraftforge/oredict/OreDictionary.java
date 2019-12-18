@@ -1,6 +1,5 @@
 package net.minecraftforge.oredict;
 
-import com.google.common.collect.Lists;
 import cpw.mods.fml.common.FMLLog;
 import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.common.eventhandler.Event;
@@ -15,7 +14,7 @@ import net.minecraft.item.crafting.IRecipe;
 import net.minecraft.item.crafting.ShapedRecipes;
 import net.minecraft.item.crafting.ShapelessRecipes;
 import net.minecraftforge.common.MinecraftForge;
-import org.apache.logging.log4j.Level;
+import org.apache.commons.lang3.ArrayUtils;
 import org.cliffc.high_scale_lib.NonBlockingHashMap;
 import org.cliffc.high_scale_lib.NonBlockingHashSet;
 
@@ -23,7 +22,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class OreDictionary {
- //Forge event
  public static class OreRegisterEvent extends Event {
   public final String Name;
   public final ItemStack Ore;
@@ -34,40 +32,129 @@ public class OreDictionary {
   }
  }
 
- /**
-  * Minecraft changed from -1 to Short.MAX_VALUE in 1.5 release for the "block wildcard". Use this in case it
-  * changes again.
-  */
- public static final int WILDCARD_VALUE = Short.MAX_VALUE;
- public static final ArrayList<ItemStack> EMPTY_LIST = new UnmodifiableArrayList(Lists.newArrayList());
-
- private static boolean
-  hasInit = false,
-  solidified = false,
- //TODO caching
- usingCachedValues = false;
-
- //TODO might be able to just use finalizedIDs.keySet() and avoid an extraneous Set
- private static final NonBlockingHashSet<String> oreDictEntries;
- private static final NonBlockingHashMap<String, Set<ItemStack>> stacks;
- private static final NonBlockingHashMap<Integer, String> uniqueHashes;
- private static final NonBlockingHashMap<String, String> childMappings;
- private static final NonBlockingHashMap<String, Integer> finalizedIDs;
-
- static {
-  oreDictEntries = new NonBlockingHashSet<>();
-  uniqueHashes = new NonBlockingHashMap<>();
-  stacks = new NonBlockingHashMap<>();
-  childMappings = new NonBlockingHashMap<>();
-  finalizedIDs = new NonBlockingHashMap<>();
-  //TODO Load ore dictionary from cache if modlist matches last launch
-  //TODO Check config hashes
-  final Loader loader = Loader.instance();
-  loader.getActiveModList();
-  initVanillaEntries();
+ private static int getItemStackHash(final ItemStack ore) {
+  String registryName = ore.getItem().delegate.name();
+  int hash;
+  if (registryName == null) {
+   hash = -1;
+  } else {
+   hash = GameData.getItemRegistry().getId(registryName);
+  }
+  if (ore.getItemDamage() != WILDCARD_VALUE) {
+   hash |= ((ore.getItemDamage() + 1) << 16);
+  }
+  return hash;
  }
 
-  @SuppressWarnings("unchecked")
+ public static final class OreDictionaryEntry {
+  //lookup maps for quick access
+  //entry ids to their entries
+  private static final Map<Integer, Set<OreDictionaryEntry>> stackHashLookup = new NonBlockingHashMap<>();
+  //entry names to entry
+  private static final Map<Integer, OreDictionaryEntry> idLookup = new NonBlockingHashMap<>();
+  //ItemStack hashes to their encapsulating entry
+  private static final Map<String, OreDictionaryEntry> nameLookup = new NonBlockingHashMap<>();
+
+  private final String name;
+  //custom set ids only, by default use hashCode
+  private final Integer id;
+  private final Set<ItemStack> stacks = new NonBlockingHashSet<>();
+
+  public OreDictionaryEntry(final String name) {
+   this.name = name;
+   this.id = null;
+   registerEntry(this);
+  }
+
+  public OreDictionaryEntry(final int id) {
+   this.name = "Filler: " + id;
+   this.id = id;
+   registerEntry(this);
+  }
+
+  private static void registerEntry(final OreDictionaryEntry entry) {
+   idLookup.put(entry.hashCode(), entry);
+   nameLookup.put(entry.name, entry);
+  }
+
+  @Override
+  public int hashCode() {
+   if (id != null) {
+    return id;
+   }
+   return super.hashCode();
+  }
+
+  public String getName() {
+   return name;
+  }
+
+  public int getId() {
+   return hashCode();
+  }
+
+  public ArrayList<ItemStack> getStacks() {
+   return new SpecialArrayList<>(stacks);
+  }
+
+  public void addStack(final ItemStack stack) {
+   if (stacks.add(stack.copy())) {
+    final int hash = getItemStackHash(stack);
+    Set<OreDictionaryEntry> entries = stackHashLookup.get(hash);
+    if (entries == null) {
+     entries = new NonBlockingHashSet<>();
+     stackHashLookup.put(hash, entries);
+    }
+    entries.add(this);
+   }
+  }
+
+  public void removeStack(final ItemStack stack) {
+   final int hash = getItemStackHash(stack);
+   final Optional<ItemStack> toRemove = stacks
+    .parallelStream()
+    .filter(s -> getItemStackHash(s) == hash)
+    .findAny();
+   //Remove associations
+   if (toRemove.isPresent()) {
+    stacks.remove(toRemove.get());
+    stackHashLookup.get(hash).remove(this);
+   }
+  }
+ }
+
+ /**Minecraft changed from -1 to Short.MAX_VALUE in 1.5 release for the "block wildcard". Use this in case it changes
+  * again.
+  */
+ public static final int WILDCARD_VALUE = Short.MAX_VALUE;
+ private static boolean hasInit = false;
+ public static final ArrayList<ItemStack> EMPTY_LIST = new SpecialArrayList<>(new ArrayList<>(0));
+// public static final Set<OreDictionaryEntry> entries = new NonBlockingHashSet<>();
+
+ public static boolean itemMatches(ItemStack target, ItemStack input, boolean strict) {
+  if (input == null && target != null || input != null && target == null) {
+   return false;
+  }
+  return (target.getItem() == input.getItem()
+   && ((target.getItemDamage() == WILDCARD_VALUE && !strict) || target.getItemDamage() == input.getItemDamage())
+  );
+ }
+
+ private static boolean containsMatch(final boolean strict, final ItemStack[] inputs, final ItemStack... targets) {
+  return Arrays
+   .stream(inputs)
+   .parallel()
+   .anyMatch(i1 -> Arrays
+    .stream(targets)
+    .anyMatch(i2 -> itemMatches(i1, i2, strict))
+   );
+ }
+
+ private static boolean containsMatch(final boolean strict, final List<ItemStack> inputs, final ItemStack... targets) {
+  return containsMatch(strict, inputs.toArray(new ItemStack[0]), targets);
+ }
+
+ @SuppressWarnings("unchecked")
  public static void initVanillaEntries() {
   if (!hasInit) {
    registerOre("logWood", new ItemStack(Blocks.log, 1, WILDCARD_VALUE));
@@ -257,315 +344,276 @@ public class OreDictionary {
   }
  }
 
- public static int getOreID(final String name) {
-  if (solidified) {
-   Integer id = finalizedIDs.get(name);
-   if (id == null) {
-    FMLLog.bigWarning(
-     "Requested the OreID, '%s', of a non-existent OreDictionary entry, forcing the creation of a new entry after solidifying!",
-     name
-    );
-    rebakeMap();
-    id = getOreID(name);
-   }
-   return id;
-  }
-  return -1;
-//  if (!solidified) {
-////   FMLLog.bigWarning(
-////    "Attempted to resolve OreDictionary ID for entry '%s' before solidifying!",
-////    name
-////   );
-//  } else {
-//   Integer id = finalizedIDs.get(name);
-//   if (id == null) {
-//    if (solidified) {
-//     FMLLog.bigWarning(
-//       "Requested the OreID, '%s', of a non-existent OreDictionary entry, forcing the creation of a new entry, after solidifying!",
-//       name
-//      );
-//     rebakeMap();
-//     id = getOreID(name);
-//    } else {
-//     id = -1;
-//    }
-//   }
-//   return id;
-//  }
-//  return -1;
+ static {
+  //There is a deadlock bug in the STL that will cause parallel streams to deadlock if invoked from the static
+  //initializer of a class. Wrapping the invocation in another thread allows the static initializer to exit and unblocks
+  //the stream workers.
+  //See: https://stackoverflow.com/a/34820251
+  new Thread(OreDictionary::initVanillaEntries).start();
  }
 
- //returns the oreDictID of the stack
+ //ADDED
+ public static OreDictionaryEntry findEntry(final String name) {
+//  return entries
+//   .parallelStream()
+//   .filter(e -> name.equals(e.name))
+//   .findAny()
+//   .orElse(null);
+  return OreDictionaryEntry.nameLookup.get(name);
+ }
+
+ /**Gets the integer ID for the specified ore name.
+  * If the name does not have a ID it assigns it a new one.
+  *
+  * @param name The unique name for this ore 'oreIron', 'ingotIron', etc..
+  * @return A number representing the ID for this ore type
+  */
+ public static int getOreID(final String name) {
+//  int id = entries
+//   .parallelStream()
+//   .filter(e -> name.equals(e.name))
+//   .findAny()
+//   .map(Object::hashCode)
+//   .orElse(-1);
+//  if (id == -1) {
+//   final OreDictionaryEntry entry = new OreDictionaryEntry(name);
+//   entries.add(entry);
+//   id = entry.hashCode();
+//  }
+//  return id;
+  OreDictionaryEntry entry = OreDictionaryEntry.nameLookup.get(name);
+  if (entry == null) {
+   entry = new OreDictionaryEntry(name);
+//   entries.add(entry);
+  }
+  return entry.getId();
+ }
+
+ /**Reverse of getOreID, will not create new entries.
+  *
+  * @param id The ID to translate to a string
+  * @return The String name, or "Unknown" if not found.
+  */
+ public static String getOreName(final int id) {
+//  return entries
+//   .parallelStream()
+//   .filter(e -> e.hashCode() == id)
+//   .findAny()
+//   .map(e -> e.name)
+//   .orElse("Unknown");
+  final OreDictionaryEntry entry = OreDictionaryEntry.idLookup.get(id);
+  if (entry != null) {
+   return entry.getName();
+  }
+  return "Unknown";
+ }
+
+ /**Gets the integer ID for the specified item stack.
+  * If the item stack is not linked to any ore, this will return -1 and no new entry will be created.
+  *
+  * @param stack The item stack of the ore.
+  * @return A number representing the ID for this ore type, or -1 if couldn't find it.
+  */
  @Deprecated
  public static int getOreID(final ItemStack stack) {
-  if (stack != null && stack.getItem() != null) {
-   if (solidified) {
-    //Can either search like this or use the unique hash
-    //TODO Check performance of hash as comparison (hashes might collide, so maybe just leave it out)
-
-    //Search implementation
-//    final Optional<Integer> optional = oreDictEntries
-//     .parallelStream()
-//     .filter(entry -> entry.stacks.contains(stack))
-//     .map(entry -> entry.dictID)
-//     .findFirst();
-//    if (optional.isPresent()) {
-//     //this should never happen... force rebake?
-//     if (optional.get() == -2) {
-//      FMLLog.bigWarning("Attempted to fetch the ID of an OreDictionary entry, which resulted in -2. Forcing a rebake!");
-//      rebakeMap();
-//      return getOreID(stack);
-//     }
-//     return optional.get();
-//    }
-
-//    Hash implementation
-    final String registryName = stack.getItem().delegate.name();
-    if (registryName != null) {
-     final int gameRegistryID = GameData.getItemRegistry().getId(registryName);
-     //Metadata specific hash
-     final String entry = uniqueHashes.get(gameRegistryID | ((stack.getItemDamage() + 1) << 16));
-     if (entry != null) {
-      return finalizedIDs.get(entry);
-     }
-    }
-   }
-   FMLLog.log(
-    Level.DEBUG,
-    "Attempted to find the oreIDs for an unregistered object (%s). This won't work very well.",
-    stack
-   );
-   return -1;
-  } else {
-   FMLLog.bigWarning("Attempted to resolve OreDictionary ID for null ItemStack!");
+  if (stack == null || stack.getItem() == null) {
    return -1;
   }
-//  if (solidified) {
-//   if (!(stack == null || stack.getItem() == null)) {
-//    //Can either search like this or use the unique hash
-//    //TODO Check performance of hash as comparison (hashes might collide, so maybe just leave it out)
-//
-//    //Search implementation
-////    final Optional<Integer> optional = oreDictEntries
-////     .parallelStream()
-////     .filter(entry -> entry.stacks.contains(stack))
-////     .map(entry -> entry.dictID)
-////     .findFirst();
-////    if (optional.isPresent()) {
-////     //this should never happen... force rebake?
-////     if (optional.get() == -2) {
-////      FMLLog.bigWarning("Attempted to fetch the ID of an OreDictionary entry, which resulted in -2. Forcing a rebake!");
-////      rebakeMap();
-////      return getOreID(stack);
-////     }
-////     return optional.get();
-////    }
-//
-////    Hash implementation
-//    final String registryName = stack.getItem().delegate.name();
-//    if (registryName != null) {
-//     final int gameRegistryID = GameData.getItemRegistry().getId(registryName);
-//     //Metadata specific hash
-//     final String entry = uniqueHashes.get(gameRegistryID | ((stack.getItemDamage() + 1) << 16));
-//     if (entry != null) {
-//      return finalizedIDs.get(entry);
-//     }
-//    }
-//
-//   }
-//  } else {
-////   FMLLog.bigWarning(
-////    "Attempted to resolve OreDictionary ID for ItemStack '%s' before solidifying!",
-////    stack.toString()
-////   );
-//  }
-//  FMLLog.log(
-//   Level.DEBUG,
-//   "Attempted to find the oreIDs for an unregistered object (%s). This won't work very well.",
-//   stack
-//  );
-//  return -1;
- }
-
- public static int[] getOreIDs(final ItemStack stack) {
-  if (stack != null && stack.getItem() != null) {
-   if (solidified) {
-    final boolean[] rebakeRequired = new boolean[] { false };
-    final List<Integer> lIDs = oreDictEntries
-     .parallelStream()
-     .filter(entry -> stacks.get(entry).contains(stack))
-     .map(finalizedIDs::get)
-     .peek(id -> rebakeRequired[0] |= (id == -1))
-     .collect(Collectors.toList());
-    if (rebakeRequired[0]) {
-     FMLLog.bigWarning(
-      "Attempted to fetch the ID of an OreDictionary entry, which resulted in -2. Forcing a rebake!"
-     );
-     rebakeMap();
-     return getOreIDs(stack);
-    } else {
-     final int[] ids = new int[lIDs.size()];
-     for (int i = 0; i < ids.length; i++) {
-      ids[i] = lIDs.get(i);
-     }
-     return ids;
-    }
-   }
-   FMLLog.log(
-    Level.DEBUG,
-    "Attempted to find the oreIDs for an unregistered object (%s). This won't work very well.",
-    stack
-   );
-   return new int[0];
-  } else {
-   FMLLog.bigWarning("Attempted to resolve OreDictionary ID for null ItemStack!");
-   return new int[0];
-  }
-//  if (solidified) {
-////   if (!(stack == null || stack.getItem() == null)) {
-//   if (!(stack == null && stack.getItem() == null)) {
-//    final boolean[] rebakeRequired = new boolean[] { false };
-//    final List<Integer> lIDs = oreDictEntries
-//     .parallelStream()
-//     .filter(entry -> stacks.get(entry).contains(stack))
-//     .map(entry -> finalizedIDs.get(entry))
-//     .peek(id -> rebakeRequired[0] |= (id == -1))
-//     .collect(Collectors.toList());
-//    if (rebakeRequired[0]) {
-//     FMLLog.bigWarning("Attempted to fetch the ID of an OreDictionary entry, which resulted in -2. Forcing a rebake!");
-//     rebakeMap();
-//     return getOreIDs(stack);
-//    } else {
-//     final int[] ids = new int[lIDs.size()];
-//     for (int i = 0; i < ids.length; i++) {
-//      ids[i] = lIDs.get(i);
-//     }
-//     return ids;
-//    }
-//   }
-//  } else {
-////   FMLLog.bigWarning(
-////    "Attempted to resolve OreDictionary ID for ItemStack '%s' before solidifying!",
-////    stack.toString()
-////   );
-//  }
-//  FMLLog.log(Level.DEBUG, "Attempted to find the oreIDs for an unregistered object (%s). This won't work very well.", stack);
-//  return new int[0];
-//
- }
-
- public static String getOreName(final int id) {
-  final String unknown = "Unknown";
-  if (!solidified) {
-//   FMLLog.bigWarning(
-//    "Attempted to resolve OreDictionary entry by ID %d before solidifying!",
-//    id
-//   );
-  } else {
-   final boolean[] rebakeRequired = { false };
-   final Optional<AbstractMap.Entry<String, Integer>> name = finalizedIDs
-    .entrySet()
-    .parallelStream()
-    .filter(entry -> {
-     rebakeRequired[0] |= entry.getValue() == -1;
-     return entry.getValue() == id;
-    })
-    .findAny();
-   if (rebakeRequired[0]) {
-    rebakeMap();
-    return getOreName(id);
-   }
-   if (name.isPresent()) {
-    return name.get().getKey();
-   }
-  }
-  return unknown;
- }
-
- //Addition
- public static List<String> getAllOreNames(final ItemStack stack) {
-  return new SpecialArrayList<>(oreDictEntries);
- }
-
- public static ArrayList<ItemStack> getOres(final String name) {
-  final Set<ItemStack> entry = stacks.get(name);
-  if (entry == null) {
-   return EMPTY_LIST;
-  }
-  return new SpecialArrayList<>(entry);
- }
-
- public static List<ItemStack> getOres(final String name, boolean alwaysCreateEntry) {
-  if (solidified && alwaysCreateEntry) {
-//   FMLLog.bigWarning(
-//    "Attempted to create OreDictionary entry for '%s' after solidifying!",
-//    name
-//   );
-  }
-  if (alwaysCreateEntry) {
-   return new SpecialArrayList<>(registerOreEntry(name));
-  }
-  return EMPTY_LIST;
- }
-
- @Deprecated
- public static ArrayList<ItemStack> getOres(final Integer id) {
-  if (!solidified) {
-//   FMLLog.bigWarning(
-//    "Attempted to resolve OreDictionary entry by ID %d before solidifying!",
-//    id
-//   );
-  }
-  if (id != null) {
-   Set<ItemStack> entry = stacks.get(getOreName(id));
-   if (entry != null) {
-    return new SpecialArrayList<>(entry);
-   }
-  }
-  return EMPTY_LIST;
- }
-
-// private static ArrayList<ItemStack> getOres(final int id) {
-//  return null;
-// }
-
- public static boolean doesOreNameExist(final String name) {
-//  return oreDictEntries
-//   .stream()
-//   .map(entry -> entry.name)
-//   .allMatch(name::equals);
-//  return getOreEntry(name) != null;
-  return oreDictEntries.contains(name);
- }
-
- public static String[] getOreNames() {
-//  return oreDictEntries
+  final int hash = getItemStackHash(stack);
+//  return entries
 //   .parallelStream()
-//   .map(entry -> entry.name)
-//   .toArray(String[]::new);
-  return oreDictEntries.toArray(new String[0]);
- }
-
- private static boolean containsMatch(final boolean strict, final List<ItemStack> inputs, final ItemStack... targets) {
-  return containsMatch(strict, inputs.toArray(new ItemStack[0]), targets);
- }
-
- private static boolean containsMatch(final boolean strict, final ItemStack[] inputs, final ItemStack... targets) {
-  for (ItemStack input : inputs) {
-   for (ItemStack target : targets) {
-    if (itemMatches(target, input, strict)) {
-     return true;
-    }
-   }
+//   .filter(e -> e
+//    .stacks
+//    .stream()
+//    .anyMatch(s -> getItemStackHash(s) == hash)
+//   )
+//   .findAny()
+//   .map(Object::hashCode)
+//   .orElse(-1);
+  final Set<OreDictionaryEntry> entries = OreDictionaryEntry.stackHashLookup.get(hash);
+  if (entries != null && !entries.isEmpty()) {
+   return entries
+    .stream()
+    .findFirst()
+    .get()
+    .getId();
   }
-  return false;
+  return -1;
  }
 
- public static boolean itemMatches(final ItemStack target, final ItemStack input, boolean strict) {
-  if (input == null && target != null || input != null && target == null) {
-   return false;
+ /**Gets all the integer ID for the ores that the specified item stakc is registered to.
+  * If the item stack is not linked to any ore, this will return an empty array and no new entry will be created.
+  *
+  * @param stack The item stack of the ore.
+  * @return An array of ids that this ore is registerd as.
+  */
+ public static int[] getOreIDs(final ItemStack stack) {
+  if (stack == null || stack.getItem() == null) {
+   return new int[0];
   }
-  return (target.getItem() == input.getItem() && ((target.getItemDamage() == WILDCARD_VALUE && !strict) || target.getItemDamage() == input.getItemDamage()));
+  final int hash = getItemStackHash(stack);
+//  return ArrayUtils.toPrimitive(entries
+//   .parallelStream()
+//   .filter(e -> e
+//    .stacks
+//    .stream()
+//    .anyMatch(s -> getItemStackHash(stack) == hash)
+//   )
+//   .map(Object::hashCode)
+//   .collect(Collectors.toList())
+//   .toArray(new Integer[0])
+//  );
+  final Set<OreDictionaryEntry> entries = OreDictionaryEntry.stackHashLookup.get(hash);
+  if (entries != null && !entries.isEmpty()) {
+   return ArrayUtils.toPrimitive(entries
+    .parallelStream()
+    .map(OreDictionaryEntry::getId)
+    .collect(Collectors.toList())
+    .toArray(new Integer[0])
+   );
+  }
+  return new int[0];
+ }
+
+ /**Retrieves the ArrayList of items that are registered to this ore type.
+  * Creates the list as empty if it did not exist.
+  * <p>
+  * The returned List is unmodifiable, but will be updated if a new ore
+  * is registered using registerOre
+  *
+  * @param name The ore name, directly calls getOreID
+  * @return An arrayList containing ItemStacks registered for this ore
+  */
+ public static ArrayList<ItemStack> getOres(final String name) {
+//  return entries
+//   .parallelStream()
+//   .filter(e -> e.name.equals(name))
+//   .map(e -> new SpecialArrayList<>(e.stacks))
+//   .findAny()
+//   .orElse(new SpecialArrayList<>(new ArrayList<>()));
+  final OreDictionaryEntry entry = OreDictionaryEntry.nameLookup.get(name);
+  if (entry != null) {
+   return entry.getStacks();
+  }
+  return EMPTY_LIST;
+ }
+
+ /**Retrieves the List of items that are registered to this ore type at this instant.
+  * If the flag is TRUE, then it will create the list as empty if it did not exist.
+  * <p>
+  * This option should be used by modders who are doing blanket scans in postInit.
+  * It greatly reduces clutter in the OreDictionary is the responsible and proper
+  * way to use the dictionary in a large number of cases.
+  * <p>
+  * The other function above is utilized in OreRecipe and is required for the
+  * operation of that code.
+  *
+  * @param name              The ore name, directly calls getOreID if the flag is TRUE
+  * @param alwaysCreateEntry Flag - should a new entry be created if empty
+  * @return An arraylist containing ItemStacks registered for this ore
+  */
+ public static List<ItemStack> getOres(final String name, final boolean alwaysCreateEntry) {
+//  OreDictionaryEntry entry = entries
+//   .parallelStream()
+//   .filter(e -> e.name.equals(name))
+//   .findAny()
+//   .orElse(null);
+  OreDictionaryEntry entry = OreDictionaryEntry.nameLookup.get(name);
+  if (entry == null && alwaysCreateEntry) {
+//   entries.add(entry = new OreDictionaryEntry(name));
+   entry = new OreDictionaryEntry(name);
+  }
+  if (entry != null) {
+//   return new SpecialArrayList<>(entry.stacks);
+   return entry.getStacks();
+  }
+  return EMPTY_LIST;
+ }
+
+ /**Returns whether or not an oreName exists in the dictionary.
+  * This function can be used to safely query the Ore Dictionary without
+  * adding needless clutter to the underlying map structure.
+  * <p>
+  * Please use this when possible and appropriate.
+  *
+  * @param name The ore name
+  * @return Whether or not that name is in the Ore Dictionary.
+  */
+ public static boolean doesOreNameExist(final String name) {
+//  return entries
+//   .parallelStream()
+//   .anyMatch(e -> e.name.equals(name));
+  return OreDictionaryEntry.nameLookup.containsKey(name);
+ }
+
+ /**Retrieves a list of all unique ore names that are already registered.
+  *
+  * @return All unique ore names that are currently registered.
+  */
+ public static String[] getOreNames() {
+//  return entries
+//   .stream()
+//   .map(e -> e.name)
+//   .collect(Collectors.toList())
+//   .toArray(new String[0]);
+  return OreDictionaryEntry
+   .nameLookup
+   .keySet()
+   .toArray(new String[0]);
+ }
+
+ /**Retrieves the ArrayList of items that are registered to this ore type.
+  * Creates the list as empty if it did not exist.
+  * <p>
+  * Warning: In 1.8, the return value will become a immutible list,
+  * and this function WILL NOT create the entry if the ID doesn't exist,
+  * IDs are intended to be internal OreDictionary things and modders
+  * should not ever code them in.
+  *
+  * @param id The ore ID, see getOreID
+  * @return An List containing ItemStacks registered for this ore
+  */
+ @Deprecated // Use the named version not int
+ public static ArrayList<ItemStack> getOres(final Integer id) {
+  if (id == null) {
+   throw new NullPointerException("FATAL: Tried to get the ItemStacks registered to a null ore ID!");
+  }
+//  final Optional<OreDictionaryEntry> optional = entries
+//   .parallelStream()
+//   .filter(e -> e.hashCode() == id)
+//   .findAny();
+//  final OreDictionaryEntry entry;
+//  if (optional.isPresent()) {
+//   entry = optional.get();
+//  } else {
+//   entry = new OreDictionaryEntry(id);
+//   entries.add(entry);
+//  }
+//  return new SpecialArrayList<>(entry.stacks);
+  OreDictionaryEntry entry = OreDictionaryEntry.idLookup.get(id);
+  if (entry == null) {
+   entry = new OreDictionaryEntry(id);
+//   entries.add(entry);
+  }
+  return entry.getStacks();
+ }
+
+// private static ArrayList<ItemStack> getOres(int id) {}
+
+ public static Collection<OreDictionaryEntry> getAllEntries() {
+  return OreDictionaryEntry.idLookup.values();
+ }
+
+ public static OreDictionaryEntry getEntry(final int id) {
+  return OreDictionaryEntry.idLookup.get(id);
+ }
+
+ public static OreDictionaryEntry getEntry(final String name) {
+  return OreDictionaryEntry.nameLookup.get(name);
+ }
+
+ public static Collection<OreDictionaryEntry> getEntries(final ItemStack stack) {
+  return OreDictionaryEntry.stackHashLookup.get(getItemStackHash(stack));
  }
 
  public static void registerOre(final String name, final Item ore) {
@@ -576,122 +624,117 @@ public class OreDictionary {
   registerOre(name, new ItemStack(ore));
  }
 
- @Deprecated
+ public static void registerOre(final String name, final ItemStack ore) {
+  registerOreImpl(name, ore);
+ }
+
+ @Deprecated //Use named, not ID in 1.8+
  public static void registerOre(final int id, final Item ore) {
   registerOre(id, new ItemStack(ore));
  }
 
- @Deprecated
+ @Deprecated //Use named, not ID in 1.8+
  public static void registerOre(final int id, final Block ore) {
   registerOre(id, new ItemStack(ore));
  }
 
- @Deprecated
+ @Deprecated //Use named, not ID in 1.8+
  public static void registerOre(final int id, final ItemStack ore) {
-  registerOre(getOreName(id), ore);
+  registerOreImpl(getOreName(id), ore);
  }
 
- //Addition
- private static Set<ItemStack> registerOreEntry(final String name) {
-  Set<ItemStack> entry;
-  if (oreDictEntries.contains(name)) {
-   entry = stacks.get(name);
+ public static void removeOre(final String name, final Item ore) {
+  removeOre(name, new ItemStack(ore));
+ }
+
+ public static void removeOre(final String name, final Block ore) {
+  removeOre(name, new ItemStack(ore));
+ }
+
+ public static void removeOre(final String name, final ItemStack ore) {
+  removeOreImpl(name, ore);
+ }
+
+ private static void removeOreImpl(final String name, final ItemStack ore) {
+  if (ore == null || ore.getItem() == null) {
+   FMLLog.bigWarning(
+    "Invalid removal attempt for an Ore Dictionary item with name %s has occurred. The registration has "
+     + "been denied to prevent crashes. Contact the developer of the '%s' mod responsible for the removal needs to "
+     + "correct this.",
+    name,
+    Loader.instance().activeModContainer().getName()
+   );
   } else {
-   oreDictEntries.add(name);
-   entry = new NonBlockingHashSet<>();
-   stacks.put(name, entry);
-   finalizedIDs.put(name, -1);
+   if (!(name == null || name.isEmpty() || name.equals("Unknown"))) {
+    final int hash = getItemStackHash(ore);
+    if (hash == -1) {
+     FMLLog.bigWarning(
+      "A broken ore dictionary removal with name %s has occurred. It adds an item (type: %s) which is "
+       + "currently unknown to the game registry. This dictionary item can only support a single value when removed "
+       + "with ores like this, and NO I am not going to turn this spam off. Just remove your ore dictionary entries "
+       + "after the GameRegistry.\nTO USERS: YES this is a BUG in the mod %s report it to them!",
+      name,
+      ore.getItem().getClass(),
+      Loader.instance().activeModContainer().getName()
+     );
+    }
+    OreDictionaryEntry entry = findEntry(name);
+    if (entry != null) {
+     entry.removeStack(ore);
+    } else {
+     //TODO possibly cache removal requests until met?
+    }
+   }
   }
-  return entry;
  }
 
- public static void registerOre(final String name, final ItemStack ore) {
-//  final long start = System.currentTimeMillis();
-  if (!(name == null || name.isEmpty() || name.equals("Unknown"))) {
-   if (ore == null || ore.getItem() == null) {
-    FMLLog.bigWarning(
-     "Invalid registration attempt for an Ore Dictionary item with name %s has occurred. The registration" +
-      " has been denied to prevent crashes. The mod responsible for the registration needs to correct this.",
-     name
-    );
-    return;
-   }
-
-   final Set<ItemStack> entryStacks = registerOreEntry(name);
-   // HACK: use the registry name's ID. It is unique and it knows about substitutions. Fallback to a -1 value (what Item.getIDForItem would have returned) in the case where the registry is not aware of the item yet
-   // IT should be noted that -1 will fail the gate further down, if an entry already exists with value -1 for this name. This is what is broken and being warned about.
-   // APPARENTLY it's quite common to do this. OreDictionary should be considered alongside Recipes - you can't make them properly until you've registered with the game.
-   String registryName = ore.getItem().delegate.name();
-   int hash;
-   if (registryName == null) {
-    FMLLog.bigWarning("A broken ore dictionary registration with name %s has occurred. It adds an item (type: %s) which is currently unknown to the game registry. This dictionary item can only support a single value when"
-     + " registered with ores like this, and NO I am not going to turn this spam off. Just register your ore dictionary entries after the GameRegistry.\n"
-     + "TO USERS: YES this is a BUG in the mod " + Loader.instance().activeModContainer().getName() + " report it to them!", name, ore.getItem().getClass());
-    hash = -1;
-   } else {
-    hash = GameData.getItemRegistry().getId(registryName);
-   }
-   if (ore.getItemDamage() != WILDCARD_VALUE) {
-    hash |= ((ore.getItemDamage() + 1) << 16); // +1 so 0 is significant
-   }
-
-   String rootHash = uniqueHashes.get(hash);
-   if (rootHash == null) {
-    uniqueHashes.put(hash, name);
-    rootHash = name;
-   } else {
-//    rootHash.addOreRegEntryChild(entryStacks);
-    childMappings.put(rootHash, name);
-   }
-
-   final ItemStack copy = ore.copy();
-//   rootHash.addStack(copy);
-   entryStacks.add(copy);
-   MinecraftForge.EVENT_BUS.post(new OreRegisterEvent(name, copy));
-  }
-//  System.out.printf("registerOre() took %dms!\n", (System.currentTimeMillis() - start));
- }
-
- //Remap all dictID values and all children maps
- public static void rebakeMap() {
-  final boolean originalState = solidified;
-  solidified = false;
-  solidify(originalState);
- }
-
- //TODO use step bar on loading screen
- public static void solidify(final boolean partialBake) {
-  if (solidified) {
-   FMLLog.bigWarning("The OreDictionary has already been solidified!");
+ private static void registerOreImpl(String name, ItemStack ore) {
+  if (ore == null || ore.getItem() == null) {
+   FMLLog.bigWarning(
+    "Invalid removal attempt for an Ore Dictionary item with name %s has occurred. The registration has "
+     + "been denied to prevent crashes. Contact the developer of the '%s' mod responsible for the registration needs "
+     + "to correct this.",
+    name,
+    Loader.instance().activeModContainer().getName()
+   );
   } else {
-   solidified = true;
-   if (partialBake) {
-    final int[] counter = new int[] { 0 };
-    //find current highest entry value and find entries to remap
-    finalizedIDs
-     .entrySet()
-     .stream()
-     .filter(entry -> {
-      if (entry.getValue() != -1) {
-       counter[0] = Math.max(counter[0], entry.getValue());
-       return false;
-      }
-      return true;
-     })
-     .map(Map.Entry::getKey)
-     .collect(Collectors.toList())
-     .forEach(name -> finalizedIDs.put(name, (counter[0] += 1)));
-   } else {
-    //final tracking variable for use within lambdas
-    final int[] counter = new int[] { 0 };
-    //reduce all OreRegistryEntry classes to actual item values
-    oreDictEntries.forEach(entry -> finalizedIDs.put(entry, (counter[0] += 1)));
-    //map all child entries to item values
-//    oreDictEntries
-//     .parallelStream()
-//     .forEach(root -> root.childDictEntries.forEach(child -> root.addChildDictID(child.dictID)));
-
-//   oreDictEntries.forEach(root -> root.childDictEntries.forEach(child -> root.addChildDictID(child.dictID)));
+   if (!(name == null || name.isEmpty() || name.equals("Unknown"))) {
+    final int hash = getItemStackHash(ore);
+    if (hash == -1) {
+     FMLLog.bigWarning(
+      "A broken ore dictionary registration with name %s has occurred. It adds an item (type: %s) which is "
+       + "currently unknown to the game registry. This dictionary item can only support a single value when registered "
+       + "with ores like this, and NO I am not going to turn this spam off. Just register your ore dictionary entries "
+       + "after the GameRegistry.\nTO USERS: YES this is a BUG in the mod %s report it to them!",
+      name,
+      ore.getItem().getClass(),
+      Loader.instance().activeModContainer().getName()
+     );
+    }
+    ore = ore.copy();
+    OreDictionaryEntry entry = findEntry(name);
+    if (entry == null) {
+//     entries.add((entry = new OreDictionaryEntry(name)));
+     entry = new OreDictionaryEntry(name);
+//     entry.stacks.add(ore);
+     entry.addStack(ore);
+    } else {
+//     final boolean contains = entry
+//      .stacks
+//      .parallelStream()
+//      .anyMatch(stack -> getItemStackHash(stack) == hash);
+//     if (contains) {
+//      return;
+//     } else {
+//      entry.stacks.add(ore);
+//     }
+     if (OreDictionaryEntry.stackHashLookup.containsKey(hash)) {
+      return;
+     } else {
+      entry.addStack(ore);
+     }
+    }
+    MinecraftForge.EVENT_BUS.post(new OreRegisterEvent(name, ore));
    }
   }
  }

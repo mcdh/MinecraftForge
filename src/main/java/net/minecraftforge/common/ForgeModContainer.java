@@ -28,7 +28,6 @@ import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.common.config.Property;
 import net.minecraftforge.common.network.ForgeNetworkHandler;
 import net.minecraftforge.fluids.FluidRegistry;
-import net.minecraftforge.oredict.OreDictionary;
 import net.minecraftforge.oredict.RecipeSorter;
 import net.minecraftforge.server.command.ForgeCommand;
 
@@ -327,7 +326,7 @@ public class ForgeModContainer extends DummyModContainer implements WorldAccessC
     public void mappingChanged(FMLModIdMappingEvent evt)
     {
         Blocks.fire.rebuildFireInfo();
-        OreDictionary.rebakeMap();
+//        OreDictionary.rebakeMap();
     }
 
 

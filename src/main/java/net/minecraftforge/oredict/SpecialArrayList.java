@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 
-public final class SpecialArrayList<T> extends ArrayList<T> {
+public class SpecialArrayList<T> extends ArrayList<T> {
  private final NonBlockingHashSet<T> internalSet;
  private final Collection
   <T> target;
